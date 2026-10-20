@@ -353,28 +353,25 @@ fn parse_xsettings_scale(xsettings: &str) -> Option<String> {
     None
 }
 
-/// Resolves the X11 scale factor from `xrdb -query` (`Xft.dpi`), `GDK_SCALE`, `QT_SCALE_FACTOR`,
-/// or XSETTINGS (`Xft/DPI`, `Gdk/WindowScalingFactor`), defaulting to `"1"`.
+/// Resolves the X11 scale factor from XSETTINGS (`Xft/DPI`, `Gdk/WindowScalingFactor`),
+/// `xrdb -query` (`Xft.dpi`), `GDK_SCALE`, or `QT_SCALE_FACTOR`.
 #[cfg(any(all(unix, not(target_os = "macos")), test))]
-fn resolve_x11_scale_factor(xrdb_stdout: Option<&str>, xsettings: Option<&str>, env: impl Fn(&str) -> Option<String>) -> String {
+fn resolve_x11_scale_factor(xrdb_stdout: Option<&str>, xsettings: Option<&str>, env: impl Fn(&str) -> Option<String>) -> Option<String> {
     let valid_env = |name: &str| env(name).and_then(|value| value.trim().parse::<f64>().ok().and_then(valid_x11_scale));
+    if let Some(scale) = xsettings.and_then(parse_xsettings_scale) {
+        return Some(scale);
+    }
     if let Some(text) = xrdb_stdout {
         for line in text.lines() {
             if let Some(rest) = line.strip_prefix("Xft.dpi:")
                 && let Ok(dpi) = rest.trim().parse::<f64>()
                 && let Some(scale) = valid_x11_scale(dpi / 96.0)
             {
-                return scale;
+                return Some(scale);
             }
         }
     }
-    if let Some(scale) = valid_env("GDK_SCALE").or_else(|| valid_env("QT_SCALE_FACTOR")) {
-        return scale;
-    }
-    if let Some(scale) = xsettings.and_then(parse_xsettings_scale) {
-        return scale;
-    }
-    "1".to_string()
+    valid_env("GDK_SCALE").or_else(|| valid_env("QT_SCALE_FACTOR"))
 }
 
 /// Runs a short-lived X11 helper with a bounded timeout so a hung server query cannot block startup.
@@ -431,8 +428,9 @@ fn ensure_x11_scale_factor() {
                 .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
             std::fs::read_to_string(config.join("xsettingsd/xsettingsd.conf")).ok()
         });
-        let scale = resolve_x11_scale_factor(xrdb_out.as_deref(), xsettings_out.as_deref(), |k| std::env::var(k).ok());
-        if let Ok(exe) = std::env::current_exe() {
+        if let Some(scale) = resolve_x11_scale_factor(xrdb_out.as_deref(), xsettings_out.as_deref(), |k| std::env::var(k).ok())
+            && let Ok(exe) = std::env::current_exe()
+        {
             use std::os::unix::process::CommandExt;
             let _ = std::process::Command::new(exe).args(std::env::args_os().skip(1)).env("WINIT_X11_SCALE_FACTOR", scale).exec();
         }
@@ -651,19 +649,23 @@ mod x11_scale_tests {
     #[test]
     fn x11_scale_factor_validates_inputs_and_preserves_xsettings_before_default() {
         let none = |_: &str| None;
-        assert_eq!(resolve_x11_scale_factor(Some("Xft.dpi:\t96\n"), None, none), "1");
-        assert_eq!(resolve_x11_scale_factor(Some("Xft.dpi: 144\n"), None, none), "1.5");
-        assert_eq!(resolve_x11_scale_factor(Some("Xft.dpi: inf\n"), None, |k| (k == "GDK_SCALE").then(|| "2".to_string())), "2");
+        assert_eq!(resolve_x11_scale_factor(Some("Xft.dpi:\t96\n"), None, none).as_deref(), Some("1"));
+        assert_eq!(resolve_x11_scale_factor(Some("Xft.dpi: 144\n"), None, none).as_deref(), Some("1.5"));
+        assert_eq!(resolve_x11_scale_factor(Some("Xft.dpi: inf\n"), None, |k| (k == "GDK_SCALE").then(|| "2".to_string())).as_deref(), Some("2"));
         assert_eq!(
             resolve_x11_scale_factor(None, None, |k| match k {
                 "GDK_SCALE" => Some(String::new()),
                 "QT_SCALE_FACTOR" => Some("1.25".to_string()),
                 _ => None,
-            }),
-            "1.25"
+            })
+            .as_deref(),
+            Some("1.25")
         );
-        assert_eq!(resolve_x11_scale_factor(None, Some("Xft/DPI 196608\n"), none), "2");
-        assert_eq!(resolve_x11_scale_factor(None, None, |k| (k == "GDK_SCALE").then(|| "invalid".to_string())), "1");
+        assert_eq!(resolve_x11_scale_factor(None, Some("Xft/DPI 196608\n"), none).as_deref(), Some("2"));
+        assert_eq!(resolve_x11_scale_factor(Some("Xft.dpi: 96\n"), Some("Xft/DPI 192\n"), none).as_deref(), Some("2"));
+        assert_eq!(resolve_x11_scale_factor(Some("Xft.dpi: 96\n"), Some("Xft/DPI 196608\n"), none).as_deref(), Some("2"));
+        assert_eq!(resolve_x11_scale_factor(None, Some("Gdk/WindowScalingFactor 1\nGdk/UnscaledDPI 98304\n"), none).as_deref(), Some("1"));
+        assert_eq!(resolve_x11_scale_factor(None, None, |k| (k == "GDK_SCALE").then(|| "invalid".to_string())), None);
     }
 }
 
