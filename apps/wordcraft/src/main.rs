@@ -199,9 +199,11 @@ fn saved_window() -> Option<WindowGeometry> {
     let mut win = UiState::from_json(&bytes)?.window?.sanitized()?;
     if let Some([mon_w, mon_h]) = win.monitor {
         // Clamp window dimensions so it never opens larger than the monitor it was saved on.
-        if win.width > mon_w || win.height > mon_h {
-            win.width = win.width.min(1440.0).min((mon_w - 40.0).max(760.0)).max(760.0);
-            win.height = win.height.min(920.0).min((mon_h - 80.0).max(480.0)).max(480.0);
+        if win.width > mon_w {
+            win.width = (mon_w - 40.0).max(760.0);
+        }
+        if win.height > mon_h {
+            win.height = (mon_h - 80.0).max(480.0);
         }
     }
     Some(win)
@@ -434,6 +436,9 @@ fn ensure_x11_scale_factor() {
             use std::os::unix::process::CommandExt;
             let _ = std::process::Command::new(exe).args(std::env::args_os().skip(1)).env("WINIT_X11_SCALE_FACTOR", scale).exec();
         }
+    }
+}
+
 /// The arguments as text, and apart the files whose names aren't valid Unicode, such as a Latin-1
 /// one (#1440). A `--control` port that isn't is an error.
 fn text_args() -> (Vec<String>, Vec<std::path::PathBuf>) {
@@ -640,7 +645,7 @@ fn main() -> eframe::Result {
 }
 
 #[cfg(test)]
-mod tests {
+mod x11_scale_tests {
     use super::*;
 
     #[test]
@@ -659,6 +664,9 @@ mod tests {
         );
         assert_eq!(resolve_x11_scale_factor(None, Some("Xft/DPI 196608\n"), none), "2");
         assert_eq!(resolve_x11_scale_factor(None, None, |k| (k == "GDK_SCALE").then(|| "invalid".to_string())), "1");
+    }
+}
+
 // Not on macOS: APFS refuses file names that aren't valid UTF-8, so no such file can exist there.
 #[cfg(all(test, unix, not(target_os = "macos")))]
 mod tests {
